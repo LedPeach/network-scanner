@@ -10,13 +10,17 @@ A high-performance asynchronous network scanner that identifies open ports via N
 ## Installation
 
 1. Clone the repository:
-   ```bash
-   git clone 
-   cd network-scanner```
+```
+bash
+git clone https://github.com/LedPeach/network-scanner.git
+cd network-scanner
+```
 
 2. Run the setup script:
-   ```chmod +x setup.sh
-   ./setup.sh```
+```
+chmod +x setup.sh
+./setup.sh
+```
 
 ## Usage
 Run the scanner by providing a subnet:
