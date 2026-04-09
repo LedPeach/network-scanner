@@ -41,6 +41,13 @@ fi
 # Install Python dependencies
 echo -e "${BLUE}Installing Python dependencies...${NC}"
 pip3 install -r requirements.txt
+# Install Python dependencies with python virtual envirnment
+echo -e "${BLUE}If you wish to install a Python library with a virtual environment:
+    
+    python3 -m venv path/to/venv
+    source path/to/venv/bin/activate
+    python3 -m pip install xyz${NC}"
+
 
 echo -e "${GREEN}Setup complete!${NC}"
 echo "To run the scanner: python3 src/fast_scan.py <subnet>"

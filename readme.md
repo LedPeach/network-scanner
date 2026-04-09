@@ -21,6 +21,13 @@ cd network-scanner
 chmod +x setup.sh
 ./setup.sh
 ```
+### Install python dependencies with python virtual envirnment
+```
+# If you wish to install a Python library with a virtual environment:  
+python3 -m venv path/to/venv
+source path/to/venv/bin/activate
+python3 -m pip install xyz
+```
 
 ## Usage
 Run the scanner by providing a subnet:
