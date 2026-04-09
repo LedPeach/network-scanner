@@ -41,7 +41,7 @@ fi
 # Install Python dependencies
 echo -e "${BLUE}Installing Python dependencies...${NC}"
 pip3 install -r requirements.txt
-# Install Python dependencies with python virtual envirnment
+# Install Python dependencies with python virtual environment
 echo -e "${BLUE}If you wish to install a Python library with a virtual environment:
     
     python3 -m venv path/to/venv
