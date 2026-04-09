@@ -12,4 +12,31 @@ A high-performance asynchronous network scanner that identifies open ports via N
 1. Clone the repository:
    ```bash
    git clone 
-   cd network-scanner
+   cd network-scanner```
+
+2. Run the setup script:
+   ```chmod +x setup.sh
+   ./setup.sh```
+
+## Usage
+Run the scanner by providing a subnet:
+```
+python3 src/fast_scan.py 192.168.1.0/24
+```
+
+## Advanced Usage
+You can override the default configuration via command line arguments:
+```
+# Increase concurrency to 500 and timeout to 5 seconds
+python3 src/fast_scan.py 192.168.1.0/24 --concurrency 500 --timeout 5.0
+```
+
+## Output
+Results are saved to scan_results.csv with the following columns:
+
+- **address**: The IP of the device.
+- **port**: The open port number.
+- **curl_content**: A snippet of the HTTP response body.
+
+## Disclaimer
+**Use this tool only on networks you own or have explicit permission to scan. Unauthorized scanning is illegal.**
