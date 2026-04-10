@@ -3,8 +3,8 @@ import httpx
 import subprocess
 import csv
 import re
-import argparse
 import sys
+import ipaddress
 
 # ==========================================
 # USER CONFIGURATION (Adjust these values)
@@ -18,7 +18,15 @@ CONFIG = {
 }
 # ==========================================
 
+def get_ip_int(ip_str):
+    """Converts an IP string to an integer for math operations."""
+    try:
+        return int(ipaddress.ip_address(ip_str))
+    except ValueError:
+        return 0
+
 async def fetch_content(client, ip, port, csv_writer, semaphore):
+    """Attempts to curl the port using HTTP and HTTPS."""
     async with semaphore:
         for proto in CONFIG["PROTOCOLS"]:
             url = f"{proto}://{ip}:{port}"
@@ -32,65 +40,96 @@ async def fetch_content(client, ip, port, csv_writer, semaphore):
                     content = response.text.strip().replace('\n', ' ').replace('\r', '')
                     content = (content[:100] + '...') if len(content) > 100 else content
                     
-                    print(f"[+] FOUND: {ip}:{port} -> {content[:30]}...")
+                    # We print to stdout, but since Stage 2 is fast, 
+                    # it won't disrupt the Stage 1 progress bar too much.
+                    print(f"\n[+] FOUND: {ip}:{port} -> {content[:30]}...")
                     csv_writer.writerow([ip, port, content])
                     return 
             except Exception:
                 continue
 
-async def scan_network(subnet, concurrency, timeout):
-    # Override config with CLI args if provided
+async def scan_network(subnet_str, concurrency, timeout):
+    # Override config with CLI args
     CONFIG["MAX_CONCURRENT_REQUESTS"] = concurrency
     CONFIG["TIMEOUT"] = timeout
 
-    print(f"[*] Stage 1: Nmap scanning {subnet}...")
-    nmap_cmd = ["nmap", "-p-", "-T4", "--open", "-oG", "-", subnet]
-    
+    # 1. Calculate Subnet Bounds for Progress Bar
+    try:
+        network = ipaddress.ip_network(subnet_str, strict=False)
+        total_ips = network.num_addresses
+        start_ip_int = int(network.network_address)
+    except ValueError as e:
+        print(f"[!] Invalid Subnet: {e}")
+        return
+
+    print(f"[*] Target Subnet: {subnet_str} ({total_ips} addresses)")
+    print(f"[*] Stage 1: Nmap scanning (this may take a while)...")
+
+    # 2. Start Nmap as an asynchronous subprocess
+    nmap_cmd = ["nmap", "-p-", "-T4", "--open", "-oG", "-", subnet_str]
     process = await asyncio.create_subprocess_exec(
         *nmap_cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    
-    stdout, stderr = await process.communicate()
-    if process.returncode != 0:
-        print(f"[!] Nmap Error: {stderr.decode()}")
-        return
 
-    output = stdout.decode()
+    found_hosts = []
+    last_ip = subnet_str # Fallback
     ip_pattern = re.compile(r"Host: (\d+\.\d+\.\d+\.\d+)")
     port_pattern = re.compile(r"(\d+)/open/tcp")
 
-    tasks = []
+    # 3. Stream Nmap output line-by-line for real-time feedback
+    while True:
+        line = await process.stdout.readline()
+        if not line:
+            break
+        
+        decoded_line = line.decode().strip()
+        ip_match = ip_pattern.search(decoded_line)
+        
+        if ip_match:
+            ip = ip_match.group(1)
+            last_ip = ip
+            ports = port_pattern.findall(decoded_line)
+            for p in ports:
+                found_hosts.append((ip, p))
+
+            # Calculate progress based on the integer value of the last IP found
+            current_ip_int = get_ip_int(ip)
+            progress = ((current_ip_int - start_ip_int) / total_ips) * 100
+            
+            # The '\r' returns the cursor to the start of the line to overwrite it
+            sys.stdout.write(
+                f"\r[Progress: {progress:6.2f}%] | Last IP: {ip:15} | Hosts Found: {len(found_hosts):4}"
+            )
+            sys.stdout.flush()
+
+    await process.wait()
+    print(f"\n[*] Stage 1 Complete. Total hosts with open ports: {len(found_hosts)}")
+
+    if not found_hosts:
+        print("[!] No open ports discovered. Exiting.")
+        return
+
+    # 4. Stage 2: Async Probing
+    print(f"[*] Stage 2: Probing {len(found_hosts)} hosts via HTTP/HTTPS...")
     semaphore = asyncio.Semaphore(CONFIG["MAX_CONCURRENT_REQUESTS"])
 
-    print(f"[*] Stage 2: Probing open ports (Concurrency: {concurrency})...")
-    
     with open(CONFIG["OUTPUT_FILE"], 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['address', 'port', 'curl_content'])
 
         async with httpx.AsyncClient(verify=False) as client:
-            for line in output.splitlines():
-                ip_match = ip_pattern.search(line)
-                if ip_match:
-                    ip = ip_match.group(1)
-                    ports = port_pattern.findall(line)
-                    for port in ports:
-                        tasks.append(fetch_content(client, ip, port, writer, semaphore))
+            tasks = [fetch_content(client, ip, port, writer, semaphore) for ip, port in found_hosts]
+            await asyncio.gather(*tasks)
 
-            if tasks:
-                await asyncio.gather(*tasks)
-            else:
-                print("[!] No open ports discovered.")
-
-    print(f"[*] Done. Results: {CONFIG['OUTPUT_FILE']}")
+    print(f"[*] All tasks finished. Results saved to {CONFIG['OUTPUT_FILE']}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="High-Speed Network Service Scanner")
     parser.add_argument("subnet", help="Target subnet (e.g., 192.168.1.0/24)")
-    parser.add_argument("--concurrency", type=int, default=CONFIG["MAX_CONCURRENT_REQUESTS"], help="Max simultaneous requests")
-    parser.add_argument("--timeout", type=float, default=CONFIG["TIMEOUT"], help="Request timeout in seconds")
+    parser.add_argument("--concurrency", type=int, default=CONFIG["MAX_CONCURRENT_REQUESTS"])
+    parser.add_argument("--timeout", type=float, default=CONFIG["TIMEOUT"])
     
     args = parser.parse_args()
 

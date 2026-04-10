@@ -7,8 +7,11 @@ venv/
 ENV/
 
 # Results
-*.csv
+scan_results.csv
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Backups
+*.bak
