@@ -8,7 +8,7 @@ import ipaddress
 import argparse
 
 # ==========================================
-# USER CONFIGURATION (Adjust these values)
+# USER CONFIGURATION
 # ==========================================
 CONFIG = {
     "MAX_CONCURRENT_REQUESTS": 200,
@@ -20,14 +20,12 @@ CONFIG = {
 # ==========================================
 
 def get_ip_int(ip_str):
-    """Converts an IP string to an integer for math operations."""
     try:
         return int(ipaddress.ip_address(ip_str))
     except ValueError:
         return 0
 
 async def fetch_content(client, ip, port, csv_writer, semaphore):
-    """Attempts to curl the port using HTTP and HTTPS."""
     async with semaphore:
         for proto in CONFIG["PROTOCOLS"]:
             url = f"{proto}://{ip}:{port}"
@@ -40,9 +38,6 @@ async def fetch_content(client, ip, port, csv_writer, semaphore):
                 if response.status_code == 200:
                     content = response.text.strip().replace('\n', ' ').replace('\r', '')
                     content = (content[:100] + '...') if len(content) > 100 else content
-                    
-                    # We print to stdout, but since Stage 2 is fast, 
-                    # it won't disrupt the Stage 1 progress bar too much.
                     print(f"\n[+] FOUND: {ip}:{port} -> {content[:30]}...")
                     csv_writer.writerow([ip, port, content])
                     return 
@@ -50,11 +45,6 @@ async def fetch_content(client, ip, port, csv_writer, semaphore):
                 continue
 
 async def scan_network(subnet_str, concurrency, timeout):
-    # Override config with CLI args
-    CONFIG["MAX_CONCURRENT_REQUESTS"] = concurrency
-    CONFIG["TIMEOUT"] = timeout
-
-    # 1. Calculate Subnet Bounds for Progress Bar
     try:
         network = ipaddress.ip_network(subnet_str, strict=False)
         total_ips = network.num_addresses
@@ -63,11 +53,20 @@ async def scan_network(subnet_str, concurrency, timeout):
         print(f"[!] Invalid Subnet: {e}")
         return
 
-    print(f"[*] Target Subnet: {subnet_str} ({total_ips} addresses)")
-    print(f"[*] Stage 1: Nmap scanning (this may take a while)...")
+    CONFIG["MAX_CONCURRENT_REQUESTS"] = concurrency
+    CONFIG["TIMEOUT"] = timeout
 
-    # 2. Start Nmap as an asynchronous subprocess
-    nmap_cmd = ["nmap", "-p-", "-T4", "--open", "-oG", "-", subnet_str]
+    print(f"[*] Target Subnet: {subnet_str} ({total_ips} addresses)")
+    print(f"[*] Stage 1: Nmap scanning (All ports)...")
+
+    # Added --stats-every 5s to get periodic updates from Nmap
+    nmap_cmd = [
+        "nmap", "-p-", "-T4", "--open", 
+        "--stats-every", "5s", 
+        "-oG", "-", 
+        subnet_str
+    ]
+    
     process = await asyncio.create_subprocess_exec(
         *nmap_cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -75,56 +74,71 @@ async def scan_network(subnet_str, concurrency, timeout):
     )
 
     found_hosts = []
-    last_ip = subnet_str # Fallback
+    last_ip = subnet_str
+    status_msg = "Initializing..."
     ip_pattern = re.compile(r"Host: (\d+\.\d+\.\d+\.\d+)")
     port_pattern = re.compile(r"(\d+)/open/tcp")
+    stats_pattern = re.compile(r"Stats: (.*)")
 
-    # 3. Stream Nmap output line-by-line for real-time feedback
-    while True:
-        line = await process.stdout.readline()
-        if not line:
-            break
-        
-        decoded_line = line.decode().strip()
-        ip_match = ip_pattern.search(decoded_line)
-        
-        if ip_match:
-            ip = ip_match.group(1)
-            last_ip = ip
-            ports = port_pattern.findall(decoded_line)
-            for p in ports:
-                found_hosts.append((ip, p))
+    # Task to read Nmap's stdout (Hosts found)
+    async def read_stdout():
+        nonlocal last_ip, status_msg
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            decoded = line.decode().strip()
+            ip_match = ip_pattern.search(decoded)
+            if ip_match:
+                ip = ip_match.group(1)
+                last_ip = ip
+                ports = port_pattern.findall(decoded)
+                for p in ports:
+                    found_hosts.append((ip, p))
+                
+                # Update progress calculation
+                current_ip_int = get_ip_int(ip)
+                progress = ((current_ip_int - start_ip_int) / total_ips) * 100
+                status_msg = f"[Progress: {progress:6.2f}%] | Last Host: {ip:15} | Found: {len(found_hosts):4}"
+                sys.stdout.write(f"\r{status_msg}")
+                sys.stdout.flush()
 
-            # Calculate progress based on the integer value of the last IP found
-            current_ip_int = get_ip_int(ip)
-            progress = ((current_ip_int - start_ip_int) / total_ips) * 100
-            
-            # The '\r' returns the cursor to the start of the line to overwrite it
-            sys.stdout.write(
-                f"\r[Progress: {progress:6.2f}%] | Last IP: {ip:15} | Hosts Found: {len(found_hosts):4}"
-            )
-            sys.stdout.flush()
+    # Task to read Nmap's stderr (The "Heartbeat" stats)
+    async def read_stderr():
+        nonlocal status_msg
+        while True:
+            line = await process.stderr.readline()
+            if not line:
+                break
+            decoded = line.decode().strip()
+            # Look for the Nmap stats line
+            if "Stats:" in decoded:
+                # We append the elapsed time to our status message to show activity
+                status_msg = f"[Nmap Running] {decoded} | Last Host: {last_ip:15}"
+                sys.stdout.write(f"\r{status_msg}")
+                sys.stdout.flush()
 
+    # Run both readers and the process concurrently
+    await asyncio.gather(read_stdout(), read_stderr())
     await process.wait()
+
     print(f"\n[*] Stage 1 Complete. Total hosts with open ports: {len(found_hosts)}")
 
     if not found_hosts:
         print("[!] No open ports discovered. Exiting.")
         return
 
-    # 4. Stage 2: Async Probing
-    print(f"[*] Stage 2: Probing {len(found_hosts)} hosts via HTTP/HTTPS...")
+    print(f"[*] Stage 2: Probing {len(found_hosts)} hosts...")
     semaphore = asyncio.Semaphore(CONFIG["MAX_CONCURRENT_REQUESTS"])
 
     with open(CONFIG["OUTPUT_FILE"], 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['address', 'port', 'curl_content'])
-
         async with httpx.AsyncClient(verify=False) as client:
             tasks = [fetch_content(client, ip, port, writer, semaphore) for ip, port in found_hosts]
             await asyncio.gather(*tasks)
 
-    print(f"[*] All tasks finished. Results saved to {CONFIG['OUTPUT_FILE']}")
+    print(f"[*] Done. Results: {CONFIG['OUTPUT_FILE']}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="High-Speed Network Service Scanner")
@@ -133,9 +147,7 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=CONFIG["TIMEOUT"])
     
     args = parser.parse_args()
-
     try:
         asyncio.run(scan_network(args.subnet, args.concurrency, args.timeout))
     except KeyboardInterrupt:
-        print("\n[!] User terminated scan.")
-        sys.exit(0)
+        print("\n[!] Aborted.")
